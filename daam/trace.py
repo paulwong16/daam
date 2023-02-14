@@ -258,6 +258,54 @@ class UNetCrossAttentionHooker(ObjectHooker[CrossAttention]):
     def _load_attn(self) -> torch.Tensor:
         return torch.load(self.data_dir / f'{self.trace._gen_idx}.pt')
 
+    def _hooked_get_attn_score(hk_self, self, query, key, attention_mask=None):
+        """
+        Monkey-patched version of :py:func:`.CrossAttention.get_attention_scores` to capture attentions and aggregate them.
+        """
+        dtype = query.dtype
+        if self.upcast_attention:
+            query = query.float()
+            key = key.float()
+        
+        if attention_mask is None:
+            baddbmm_input = torch.empty(
+                query.shape[0], query.shape[1], key.shape[1], dtype=query.dtype, device=query.device
+            )
+            beta = 0
+        else:
+            baddbmm_input = attention_mask
+            beta = 1
+            
+        attention_scores = torch.baddbmm(
+            baddbmm_input,
+            query,
+            key.transpose(-1, -2),
+            beta=beta,
+            alpha=self.scale,
+        )
+        
+        if self.upcast_softmax:
+            attention_scores = attention_scores.float()
+        attention_probs = attention_scores.softmax(dim=-1)
+
+        if hk_self.save_heads:
+            hk_self._save_attn(attention_probs)
+        elif hk_self.load_heads:
+            attention_probs = hk_self._load_attn()
+        
+        factor = int(math.sqrt(hk_self.latent_hw // attention_probs.shape[1]))
+        hk_self.trace._gen_idx += 1
+        if attention_probs.shape[-1] == hk_self.context_size and factor != 8:
+            # shape: (batch_size, 64 // factor, 64 // factor, 77)
+            maps = hk_self._unravel_attn(attention_probs)
+
+            for head_idx, heatmap in enumerate(maps):
+                hk_self.heat_maps.update(factor, hk_self.layer_idx, head_idx, heatmap)
+        attention_probs = attention_probs.to(dtype)
+            
+        return attention_probs
+        
+        
     def _hooked_attention(hk_self, self, query, key, value):
         """
         Monkey-patched version of :py:func:`.CrossAttention._attention` to capture attentions and aggregate them.
@@ -302,8 +350,11 @@ class UNetCrossAttentionHooker(ObjectHooker[CrossAttention]):
         return hidden_states
 
     def _hook_impl(self):
-        self.monkey_patch('_attention', self._hooked_attention)
-        self.monkey_patch('_sliced_attention', self._hooked_sliced_attention)
+        self.monkey_patch('get_attention_scores', self._hooked_get_attn_score)
+        
+    #def _hook_impl(self):
+    #    self.monkey_patch('_attention', self._hooked_attention)
+    #    self.monkey_patch('_sliced_attention', self._hooked_sliced_attention)
 
     @property
     def num_heat_maps(self):
