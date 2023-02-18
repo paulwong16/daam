@@ -9,7 +9,7 @@ import PIL.Image as Image
 import torch
 import torch.nn.functional as F
 
-from .utils import cache_dir, auto_autocast
+from .utils import cache_dir, auto_autocast, compute_token_merge_indices
 from .experiment import GenerationExperiment
 from .heatmap import RawHeatMapCollection, GlobalHeatMap
 from .hook import ObjectHooker, AggregateHooker, UNetCrossAttentionLocator
@@ -26,7 +26,11 @@ class DiffusionHeatMapHooker(AggregateHooker):
             low_memory: bool = False,
             load_heads: bool = False,
             save_heads: bool = False,
-            data_dir: str = None
+            data_dir: str = None,
+            prompt: str = None,
+            highlight_key_words: list = None, # [Focus_more_keywords, Focus_less_keywords]. String separate by space.
+            highlight_amp_mags: list = None # [more_magnitude, less_magnitude] hightlight amplified magnitude 
+            
     ):
         self.all_heat_maps = RawHeatMapCollection()
         h = (pipeline.unet.config.sample_size * pipeline.vae_scale_factor)
@@ -37,6 +41,23 @@ class DiffusionHeatMapHooker(AggregateHooker):
         self.last_image: Image = None
         self.time_idx = 0
         self._gen_idx = 0
+        self.user_input_prompt = prompt
+        self.user_hightlight_key_words = highlight_key_words
+        if self.user_hightlight_key_words is not None:
+            print("Hightlight keywords: {}".format(self.user_hightlight_key_words))
+            if highlight_key_words[0] is not None:
+                focus_more = compute_token_merge_indices(pipeline.tokenizer, self.user_input_prompt,
+                                                                highlight_key_words[0])[0]
+            else:
+                focus_more = None
+            if highlight_key_words[1] is not None:
+                focus_less = compute_token_merge_indices(pipeline.tokenizer, self.user_input_prompt,
+                                                                highlight_key_words[1])[0]
+            else:
+                focus_less = None
+            self.user_hightlight_key_words = [focus_more, focus_less]
+            print("Hightlight index: {}".format(self.user_hightlight_key_words))
+        self.user_highlight_amp_mags = highlight_amp_mags
 
         modules = [
             UNetCrossAttentionHooker(
@@ -217,6 +238,18 @@ class UNetCrossAttentionHooker(ObjectHooker[CrossAttention]):
 
         maps = torch.stack(maps, 0)  # shape: (tokens, heads, height, width)
         return maps.permute(1, 0, 2, 3).contiguous()  # shape: (heads, tokens, height, width)
+    
+    def _amplifier(self, input_x):
+        if self.trace.user_hightlight_key_words is None:
+            return input_x
+        multiplier = torch.ones_like(input_x)
+        focus_more = self.trace.user_hightlight_key_words[0]
+        focus_less = self.trace.user_hightlight_key_words[1]
+        if focus_more is not None:
+            multiplier[..., focus_more] = self.trace.user_highlight_amp_mags[0]
+        if focus_less is not None:
+            multiplier[..., focus_less] = self.trace.user_highlight_amp_mags[1]
+        return input_x * multiplier
 
     def _hooked_sliced_attention(hk_self, self, query, key, value, sequence_length, dim):
         batch_size_attention = query.shape[0]
@@ -286,6 +319,10 @@ class UNetCrossAttentionHooker(ObjectHooker[CrossAttention]):
         
         if self.upcast_softmax:
             attention_scores = attention_scores.float()
+        
+        factor = int(math.sqrt(hk_self.latent_hw // attention_scores.shape[1]))
+        if attention_scores.shape[-1] == hk_self.context_size and factor != 8:
+            attention_scores = hk_self._amplifier(attention_scores)
         attention_probs = attention_scores.softmax(dim=-1)
 
         if hk_self.save_heads:
@@ -293,7 +330,6 @@ class UNetCrossAttentionHooker(ObjectHooker[CrossAttention]):
         elif hk_self.load_heads:
             attention_probs = hk_self._load_attn()
         
-        factor = int(math.sqrt(hk_self.latent_hw // attention_probs.shape[1]))
         hk_self.trace._gen_idx += 1
         if attention_probs.shape[-1] == hk_self.context_size and factor != 8:
             # shape: (batch_size, 64 // factor, 64 // factor, 77)
@@ -351,10 +387,6 @@ class UNetCrossAttentionHooker(ObjectHooker[CrossAttention]):
 
     def _hook_impl(self):
         self.monkey_patch('get_attention_scores', self._hooked_get_attn_score)
-        
-    #def _hook_impl(self):
-    #    self.monkey_patch('_attention', self._hooked_attention)
-    #    self.monkey_patch('_sliced_attention', self._hooked_sliced_attention)
 
     @property
     def num_heat_maps(self):
