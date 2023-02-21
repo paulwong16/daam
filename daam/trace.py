@@ -28,7 +28,7 @@ class DiffusionHeatMapHooker(AggregateHooker):
             save_heads: bool = False,
             data_dir: str = None,
             prompt: str = None,
-            highlight_key_words: list = None, # [Focus_more_keywords, Focus_less_keywords]. String separate by space.
+            highlight_key_words: list = None, # [Focus_more_keywords, Focus_less_keywords]. List of String separate by space.
             highlight_amp_mags: list = None # [more_magnitude, less_magnitude] hightlight amplified magnitude 
             
     ):
@@ -46,13 +46,19 @@ class DiffusionHeatMapHooker(AggregateHooker):
         if self.user_hightlight_key_words is not None:
             print("Hightlight keywords: {}".format(self.user_hightlight_key_words))
             if highlight_key_words[0] is not None:
-                focus_more = compute_token_merge_indices(pipeline.tokenizer, self.user_input_prompt,
-                                                                highlight_key_words[0])[0]
+                focus_more = list()
+                for word in highlight_key_words[0]:
+                    focus_more += compute_token_merge_indices(pipeline.tokenizer, 
+                                                              self.user_input_prompt,
+                                                              word)[0]
             else:
                 focus_more = None
             if highlight_key_words[1] is not None:
-                focus_less = compute_token_merge_indices(pipeline.tokenizer, self.user_input_prompt,
-                                                                highlight_key_words[1])[0]
+                focus_less = list()
+                for word in highlight_key_words[1]:
+                    focus_less += compute_token_merge_indices(pipeline.tokenizer, 
+                                                            self.user_input_prompt,
+                                                            word)[0]
             else:
                 focus_less = None
             self.user_hightlight_key_words = [focus_more, focus_less]
