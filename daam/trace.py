@@ -47,22 +47,39 @@ class DiffusionHeatMapHooker(AggregateHooker):
             print("Hightlight keywords: {}".format(self.user_hightlight_key_words))
             if highlight_key_words[0] is not None:
                 focus_more = list()
-                for word in highlight_key_words[0]:
-                    focus_more += compute_token_merge_indices(pipeline.tokenizer, 
+                focus_more_value = list()
+                for i in range(len(highlight_key_words[0])):
+                    word = highlight_key_words[0][i]
+                    word_index = compute_token_merge_indices(pipeline.tokenizer,
                                                               self.user_input_prompt,
                                                               word)[0]
+                    focus_more += word_index
+                    if isinstance(highlight_amp_mags[0], list):
+                        focus_more_value += [highlight_amp_mags[0][i]] * len(word_index)
+                    else:
+                        focus_more_value += [highlight_amp_mags[0]] * len(word_index)
             else:
                 focus_more = None
+                focus_more_value = None
             if highlight_key_words[1] is not None:
                 focus_less = list()
-                for word in highlight_key_words[1]:
-                    focus_less += compute_token_merge_indices(pipeline.tokenizer, 
-                                                            self.user_input_prompt,
-                                                            word)[0]
+                focus_less_value = list()
+                for i in range(len(highlight_key_words[1])):
+                    word = highlight_key_words[1][i]
+                    word_index = compute_token_merge_indices(pipeline.tokenizer,
+                                                             self.user_input_prompt,
+                                                             word)[0]
+                    focus_less += word_index
+                    if isinstance(highlight_amp_mags[1], list):
+                        focus_less_value += [highlight_amp_mags[1][i]] * len(word_index)
+                    else:
+                        focus_less_value += [highlight_amp_mags[1]] * len(word_index)
             else:
                 focus_less = None
+                focus_less_value = None
             self.user_hightlight_key_words = [focus_more, focus_less]
             print("Hightlight index: {}".format(self.user_hightlight_key_words))
+            self.user_highlight_amp_mags_per_token = [focus_more_value, focus_less_value]
         self.user_highlight_amp_mags = highlight_amp_mags
 
         modules = [
@@ -252,9 +269,15 @@ class UNetCrossAttentionHooker(ObjectHooker[CrossAttention]):
         focus_more = self.trace.user_hightlight_key_words[0]
         focus_less = self.trace.user_hightlight_key_words[1]
         if focus_more is not None:
-            multiplier[..., focus_more] = self.trace.user_highlight_amp_mags[0]
+            # for idx in range(len(focus_more)):
+            #     word_idx = focus_more[idx]
+            #     multiplier[..., word_idx] = self.trace.user_highlight_amp_mags_per_token[0][idx]
+            multiplier[..., focus_more] *= torch.tensor(self.trace.user_highlight_amp_mags_per_token[0], device=multiplier.get_device())
         if focus_less is not None:
-            multiplier[..., focus_less] = self.trace.user_highlight_amp_mags[1]
+            # for idx in range(len(focus_less)):
+            #     word_idx = focus_less[idx]
+            #     multiplier[..., word_idx] = self.trace.user_highlight_amp_mags_per_token[1][idx]
+            multiplier[..., focus_less] *= torch.tensor(self.trace.user_highlight_amp_mags_per_token[1], device=multiplier.get_device())
         return input_x * multiplier
 
     def _hooked_sliced_attention(hk_self, self, query, key, value, sequence_length, dim):
